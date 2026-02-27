@@ -1,0 +1,163 @@
+{
+  "created_at": "2026-02-27T12:15:35.122767",
+  "video_path": "C:\\Users\\Gustavo\\Desktop\\DrApurbasTasks\\VideoAnomaly\\VideoCaptioningEnglish\\VideoAnomaly\\input_video.mp4",
+  "extract_fps": 1.0,
+  "max_frames": 30,
+  "threshold_diff": 13.310927169358221,
+  "threshold_ssim": 0.7930801216880115,
+  "frames": [
+    {
+      "frame_idx": 0,
+      "time_sec": 0.0,
+      "difference": 0.0,
+      "ssim": 1.0,
+      "is_anomaly": false
+    },
+    {
+      "frame_idx": 1,
+      "time_sec": 1.0,
+      "difference": 1.4193793535232544,
+      "ssim": 0.980188526037678,
+      "is_anomaly": false
+    },
+    {
+      "frame_idx": 2,
+      "time_sec": 2.0,
+      "difference": 2.255063772201538,
+      "ssim": 0.9834489051024314,
+      "is_anomaly": false
+    },
+    {
+      "frame_idx": 3,
+      "time_sec": 3.0,
+      "difference": 0.9179325699806213,
+      "ssim": 0.9935249827505045,
+      "is_anomaly": false
+    },
+    {
+      "frame_idx": 4,
+      "time_sec": 4.0,
+      "difference": 1.608977198600769,
+      "ssim": 0.9919950308305274,
+      "is_anomaly": false
+    },
+    {
+      "frame_idx": 5,
+      "time_sec": 5.0,
+      "difference": 0.8850550055503845,
+      "ssim": 0.9953587880723856,
+      "is_anomaly": false
+    },
+    {
+      "frame_idx": 6,
+      "time_sec": 6.0,
+      "difference": 2.0146121978759766,
+      "ssim": 0.994133584709485,
+      "is_anomaly": false
+    },
+    {
+      "frame_idx": 7,
+      "time_sec": 7.0,
+      "difference": 1.0360604524612427,
+      "ssim": 0.9961280266237151,
+      "is_anomaly": false
+    },
+    {
+      "frame_idx": 8,
+      "time_sec": 8.0,
+      "difference": 1.8176721334457397,
+      "ssim": 0.9917147079085302,
+      "is_anomaly": false
+    },
+    {
+      "frame_idx": 9,
+      "time_sec": 9.0,
+      "difference": 1.5615957975387573,
+      "ssim": 0.9836256442496044,
+      "is_anomaly": false
+    },
+    {
+      "frame_idx": 10,
+      "time_sec": 10.0,
+      "difference": 4.7276835441589355,
+      "ssim": 0.930537369084531,
+      "is_anomaly": false
+    },
+    {
+      "frame_idx": 11,
+      "time_sec": 11.0,
+      "difference": 8.811704635620117,
+      "ssim": 0.8593832249861525,
+      "is_anomaly": false
+    },
+    {
+      "frame_idx": 12,
+      "time_sec": 12.0,
+      "difference": 12.097728729248047,
+      "ssim": 0.8154127352788697,
+      "is_anomaly": false
+    },
+    {
+      "frame_idx": 13,
+      "time_sec": 13.0,
+      "difference": 14.435619354248047,
+      "ssim": 0.7587190495260175,
+      "is_anomaly": true
+    },
+    {
+      "frame_idx": 14,
+      "time_sec": 14.0,
+      "difference": 14.190972328186035,
+      "ssim": 0.8005932389627877,
+      "is_anomaly": true
+    },
+    {
+      "frame_idx": 15,
+      "time_sec": 15.0,
+      "difference": 9.213143348693848,
+      "ssim": 0.8522272814044591,
+      "is_anomaly": true
+    },
+    {
+      "frame_idx": 16,
+      "time_sec": 16.0,
+      "difference": 5.883969783782959,
+      "ssim": 0.9286387608545572,
+      "is_anomaly": true
+    },
+    {
+      "frame_idx": 17,
+      "time_sec": 17.0,
+      "difference": 3.3163700103759766,
+      "ssim": 0.955332261708559,
+      "is_anomaly": true
+    },
+    {
+      "frame_idx": 18,
+      "time_sec": 18.0,
+      "difference": 3.3982205390930176,
+      "ssim": 0.9729457613991671,
+      "is_anomaly": true
+    },
+    {
+      "frame_idx": 19,
+      "time_sec": 19.0,
+      "difference": 1.6196470260620117,
+      "ssim": 0.988711089617394,
+      "is_anomaly": true
+    },
+    {
+      "frame_idx": 20,
+      "time_sec": 20.0,
+      "difference": 1.9705222845077515,
+      "ssim": 0.9962926085180615,
+      "is_anomaly": true
+    }
+  ],
+  "summary": {
+    "total_frames": 21,
+    "anomalous_frames": 8,
+    "first_anomaly_time": 13.0,
+    "last_anomaly_time": 20.0
+  }
+}

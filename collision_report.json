@@ -1,0 +1,79 @@
+[
+  {
+    "frame_idx": 0,
+    "time_sec": 0.0,
+    "anomaly_score": 0.3178,
+    "caption": "a street scene",
+    "saved_as": "collisions\\collision_00000_t0.0s.jpg"
+  },
+  {
+    "frame_idx": 30,
+    "time_sec": 2.0,
+    "anomaly_score": 0.2724,
+    "caption": "a street scene",
+    "saved_as": "collisions\\collision_00001_t2.0s.jpg"
+  },
+  {
+    "frame_idx": 60,
+    "time_sec": 4.0,
+    "anomaly_score": 0.3516,
+    "caption": "a street scene",
+    "saved_as": "collisions\\collision_00002_t4.0s.jpg"
+  },
+  {
+    "frame_idx": 90,
+    "time_sec": 6.0,
+    "anomaly_score": 0.3166,
+    "caption": "a street scene",
+    "saved_as": "collisions\\collision_00003_t6.0s.jpg"
+  },
+  {
+    "frame_idx": 120,
+    "time_sec": 8.0,
+    "anomaly_score": 0.2726,
+    "caption": "a street scene",
+    "saved_as": "collisions\\collision_00004_t8.0s.jpg"
+  },
+  {
+    "frame_idx": 150,
+    "time_sec": 10.0,
+    "anomaly_score": 0.3197,
+    "caption": "a car driving down a street",
+    "saved_as": "collisions\\collision_00005_t10.0s.jpg"
+  },
+  {
+    "frame_idx": 180,
+    "time_sec": 12.0,
+    "anomaly_score": 0.3021,
+    "caption": "a bus driving down a street",
+    "saved_as": "collisions\\collision_00006_t12.0s.jpg"
+  },
+  {
+    "frame_idx": 210,
+    "time_sec": 14.0,
+    "anomaly_score": 0.1968,
+    "caption": "a car driving down a street",
+    "saved_as": "collisions\\collision_00007_t14.0s.jpg"
+  },
+  {
+    "frame_idx": 240,
+    "time_sec": 16.0,
+    "anomaly_score": 0.307,
+    "caption": "a car driving down a street",
+    "saved_as": "collisions\\collision_00008_t16.0s.jpg"
+  },
+  {
+    "frame_idx": 270,
+    "time_sec": 18.0,
+    "anomaly_score": 0.2483,
+    "caption": "a car driving down a street",
+    "saved_as": "collisions\\collision_00009_t18.0s.jpg"
+  },
+  {
+    "frame_idx": 300,
+    "time_sec": 20.0,
+    "anomaly_score": 0.2906,
+    "caption": "a bus on a street",
+    "saved_as": "collisions\\collision_00010_t20.0s.jpg"
+  }
+]

@@ -1,0 +1,57 @@
+[
+  {
+    "frame_idx": 0,
+    "time_sec": 0.0,
+    "caption": "a street scene"
+  },
+  {
+    "frame_idx": 30,
+    "time_sec": 2.0,
+    "caption": "a street scene"
+  },
+  {
+    "frame_idx": 60,
+    "time_sec": 4.0,
+    "caption": "a street scene"
+  },
+  {
+    "frame_idx": 90,
+    "time_sec": 6.0,
+    "caption": "a street scene"
+  },
+  {
+    "frame_idx": 120,
+    "time_sec": 8.0,
+    "caption": "a street scene"
+  },
+  {
+    "frame_idx": 150,
+    "time_sec": 10.0,
+    "caption": "a car driving down a street"
+  },
+  {
+    "frame_idx": 180,
+    "time_sec": 12.0,
+    "caption": "a bus driving down a street"
+  },
+  {
+    "frame_idx": 210,
+    "time_sec": 14.0,
+    "caption": "a car driving down a street"
+  },
+  {
+    "frame_idx": 240,
+    "time_sec": 16.0,
+    "caption": "a car driving down a street"
+  },
+  {
+    "frame_idx": 270,
+    "time_sec": 18.0,
+    "caption": "a car driving down a street"
+  },
+  {
+    "frame_idx": 300,
+    "time_sec": 20.0,
+    "caption": "a bus on a street"
+  }
+]
