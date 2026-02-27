@@ -238,7 +238,6 @@ def run():
     # Step 2.5: Chunking and description (after anomaly detection)
     chunk_descriptions = []
     chunk_violations = []
-    # ...existing code...
 
     # Step 0: Clean previous output
     print("[Step 0] Cleaning previous output...")
@@ -340,7 +339,7 @@ def run():
     print(f"Anomalous frames also saved in: {ANOMALY_DIR}")
     print("="*68 + "\n")
 
-    # ...existing code...
+    # ... code...
     # Step 3.5: BLIP chunking and VQA/question answering (after anomaly detection)
     if processor:
         print("\n[Step 3.5] Generating descriptions and VQA for video chunks...\n")
@@ -517,7 +516,6 @@ def run():
     print(f"Anomalous frames: \033[91m{anomaly_count}\033[0m")
     print(f"Normal frames: \033[92m{normal_count}\033[0m")
     print("==========================\n")
-    # Não há mais processamento após exibir os resultados
 
 if __name__ == "__main__":
     run()
