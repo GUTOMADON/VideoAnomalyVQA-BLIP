@@ -1,521 +1,548 @@
-
 """
 Video Anomaly Detection & Captioning
-Detects visual anomalies in video using classic CV 
-(frame difference + SSIM) and generates chunk captions with BLIP. 
-Outputs: summary, grid, timeline, JSON, chunk analysis.
-
-SSIM: Measures how similar two images are (higher = more similar).
+-------------------------------------
+- Extracts frames at 1 FPS (configurable)
+- Detects anomalies via frame difference + SSIM
+- Captions EVERY frame with BLIP using anomaly-focused prompts
+- For anomaly frames: uses a dedicated "what happened?" prompt
+- Maps captions -> alerts via expanded prompt engineering
+- Colored terminal output: RED = ANOMALY, GREEN = Normal
+- Saves: frames/, collisions/, report.json, grid, timeline chart
+- Clears output folders on each run
 """
 
-try:
-    from transformers import BlipProcessor, BlipForConditionalGeneration
-    import torch
-except ImportError:
+import subprocess, sys, os
 
-    BlipProcessor = BlipForConditionalGeneration = torch = None
+REQUIRED = [
+    "numpy", "opencv-python", "scikit-image", "matplotlib",
+    "Pillow", "transformers", "torch", "torchvision",
+]
 
- # BLIP utility functions
-def load_blip():
-    if not (BlipProcessor and BlipForConditionalGeneration and torch):
-        return None, None, None
-    processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
-    model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-    return processor, model, device
-
-def describe_frame(img, processor, model, device):
-
-    inputs = processor(images=img, return_tensors="pt").to(device)
-    out = model.generate(**inputs, max_new_tokens=20)
-    return processor.decode(out[0], skip_special_tokens=True)
-
- # BLIP VQA utility function
-def vqa_frame(img, processor, model, device, question):
-    # Use BLIP for VQA if supported
+def _install(pkg):
     try:
-        inputs = processor(images=img, text=question, return_tensors="pt").to(device)
-        out = model.generate(**inputs, max_new_tokens=10)
-        answer = processor.decode(out[0], skip_special_tokens=True)
-        return answer
-    except Exception:
-        return None
+        subprocess.check_call(["uv", "pip", "install", "--quiet", pkg],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "--quiet", pkg,
+             "--break-system-packages"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-import os
-import sys
-import json
-import math
-import shutil
-import stat
-import time
+for _pkg in REQUIRED:
+    try:
+        __import__(_pkg.split("[")[0].replace("-","_").replace("opencv_python","cv2"))
+    except ImportError:
+        print(f"[SETUP] Installing {_pkg}...")
+        _install(_pkg)
+
+import json, math, shutil, warnings
+from datetime import datetime
+
 import numpy as np
-from skimage.metrics import structural_similarity as ssim
 import cv2
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from PIL import Image, ImageDraw
-from datetime import datetime
-from pathlib import Path
+from skimage.metrics import structural_similarity as ssim
+
+warnings.filterwarnings("ignore")
+
+try:
+    import torch
+    from transformers import BlipProcessor, BlipForConditionalGeneration
+    BLIP_AVAILABLE = True
+except ImportError:
+    BLIP_AVAILABLE = False
+
+# ── Configuration ────────────────────────────────────────────────────────────────
+VIDEO_PATH  = r"input_video.mp4"
+OUTPUT_DIR  = "output_video"
+FRAMES_DIR  = os.path.join(OUTPUT_DIR, "frames")
+ANOMALY_DIR = os.path.join(OUTPUT_DIR, "collisions")
+REPORT_PATH = os.path.join(OUTPUT_DIR, "report.json")
+CHART_PATH  = os.path.join(OUTPUT_DIR, "anomaly_timeline.png")
+GRID_PATH   = os.path.join(OUTPUT_DIR, "all_frames_grid.jpg")
+
+EXTRACT_FPS = 1.0
+MAX_FRAMES  = 60
+CHUNK_SIZE  = 10
+DIFF_SIZE   = (96, 96)
+
+RED    = "\033[91m"
+GREEN  = "\033[92m"
+CYAN   = "\033[96m"
+YELLOW = "\033[93m"
+RESET  = "\033[0m"
+BOLD   = "\033[1m"
+DIM    = "\033[2m"
+
+# ── Prompts ───────────────────────────────────────────────────────────────────────
+CAPTION_PROMPT         = "a traffic camera photo of"
+ANOMALY_CAPTION_PROMPT = "a traffic camera showing an accident where"
+
+VQA_ACCIDENT   = "is there a vehicle collision or traffic accident in this image?"
+VQA_FIRE       = "is there fire or smoke visible in this image?"
+VQA_FALL       = "has a person fallen down or been knocked over in this image?"
+VQA_WRONG_SIDE = "is a vehicle on the wrong side of the road in this image?"
+VQA_SEVERITY   = "how severe is the incident in this image? answer: minor, moderate, or severe"
+
+# Respostas válidas para severidade
+VALID_SEVERITIES = {"minor", "moderate", "severe"}
+
+# ── Alert rules (order = priority, first match wins) ─────────────────────────────
+ALERT_RULES = [
+    # CRITICAL
+    (["crash", "collision", "collide", "accident", "wreck", "smash", "impact",
+      "overturned", "overturn", "flipped", "rolled over", "pile-up", "pileup",
+      "rear-end", "head-on", "sideswipe", "t-bone", "spun out", "skidded",
+      "slammed", "rammed", "struck", "hit by", "ran into", "drove into",
+      "ran a red", "ran red light", "wrong way", "wrong side"],
+     "COLLISION / CRASH",     "CRITICAL"),
+
+    (["fire", "smoke", "burning", "flame", "blaze", "engulfed", "on fire"],
+     "FIRE / SMOKE",          "CRITICAL"),
+
+    # HIGH
+    (["fall", "fallen", "falling", "knocked down", "lying on road",
+      "lying in street", "lying on ground", "hit pedestrian", "struck pedestrian",
+      "pedestrian down", "person down", "run over", "runover"],
+     "PERSON DOWN / FALL",    "HIGH"),
+
+    (["fight", "fighting", "violence", "attack", "assault", "brawl"],
+     "VIOLENCE",              "HIGH"),
+
+    (["debris", "obstacle", "object on road", "tire on road", "car parts",
+      "broken glass", "scattered", "blocking the road", "blocking road"],
+     "ROAD DEBRIS / HAZARD",  "HIGH"),
+
+    # MEDIUM
+    (["speeding", "racing", "chase", "high speed", "reckless"],
+     "RECKLESS DRIVING",      "MEDIUM"),
+
+    (["skid", "swerve", "swerving", "sliding", "lost control", "hydroplane"],
+     "LOSS OF CONTROL",       "MEDIUM"),
+
+    (["stalled", "broken down", "stopped in lane", "blocking lane",
+      "disabled vehicle", "flat tire"],
+     "STALLED VEHICLE",       "MEDIUM"),
+
+    # LOW / INFO
+    (["jaywalking", "crossing", "pedestrian crossing", "person crossing",
+      "person walking"],
+     "PEDESTRIAN",            "LOW"),
+
+    (["traffic", "road", "street", "highway", "car", "vehicle", "truck",
+      "bus", "motorcycle", "parking", "parked", "intersection", "driving",
+      "lane", "signal", "light"],
+     "TRAFFIC SCENE",         "INFO"),
+]
+
+def map_caption_to_alert(caption: str):
+    cap = caption.lower()
+    for keywords, label, severity in ALERT_RULES:
+        if any(kw in cap for kw in keywords):
+            return label, severity
+    return "NO ALERT", "NORMAL"
 
 
- # Configuration
-OUTPUT_DIR      = "output_video"
-FRAMES_DIR      = os.path.join(OUTPUT_DIR, "frames")
-ANOMALY_DIR     = os.path.join(OUTPUT_DIR, "collisions")
-REPORT_PATH     = os.path.join(OUTPUT_DIR, "report.json")
-CHART_PATH      = os.path.join(OUTPUT_DIR, "anomaly_timeline.png")
-GRID_PATH       = os.path.join(OUTPUT_DIR, "all_frames_grid.jpg")
+# ── BLIP helpers ──────────────────────────────────────────────────────────────────
+def load_blip():
+    if not BLIP_AVAILABLE:
+        return None, None, None
+    print(f"{CYAN}[BLIP] Loading model (blip-image-captioning-large)...{RESET}")
+    processor = BlipProcessor.from_pretrained(
+        "Salesforce/blip-image-captioning-large", use_fast=False)
+    model = BlipForConditionalGeneration.from_pretrained(
+        "Salesforce/blip-image-captioning-large",
+        ignore_mismatched_sizes=True)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device).eval()
+    print(f"{CYAN}[BLIP] Loaded on {device}.{RESET}\n")
+    return processor, model, device
 
 
-VIDEO_PATH      = r"C:\Users\Gustavo\Desktop\DrApurbasTasks\VideoAnomaly\VideoCaptioningEnglish\VideoAnomaly\input_video.mp4"
-EXTRACT_FPS     = 1.0   # Frames per second to extract
-MAX_FRAMES      = 30    # Maximum frames to process
+def blip_caption(img, processor, model, device, prompt=None) -> str:
+    with torch.no_grad():
+        if prompt:
+            inputs = processor(images=img, text=prompt,
+                               return_tensors="pt").to(device)
+        else:
+            inputs = processor(images=img, return_tensors="pt").to(device)
+        out = model.generate(**inputs, max_new_tokens=60,
+                             num_beams=5, length_penalty=1.2)
+    text = processor.decode(out[0], skip_special_tokens=True)
+    if prompt and text.lower().startswith(prompt.lower()):
+        text = text[len(prompt):].strip()
+    return text
 
 
- # Utility functions
-def clean_output_dirs():
+def blip_vqa(img, processor, model, device, question: str) -> str:
+    try:
+        with torch.no_grad():
+            inputs = processor(images=img, text=question,
+                               return_tensors="pt").to(device)
+            out = model.generate(**inputs, max_new_tokens=8)
+        return processor.decode(out[0], skip_special_tokens=True).strip().lower()
+    except Exception:
+        return "n/a"
 
+
+def parse_severity(raw: str) -> str:
+    """
+    Extrai apenas 'minor', 'moderate' ou 'severe' da resposta do VQA.
+    Retorna 'n/a' se o modelo ecoou a pergunta ou respondeu algo inválido.
+    """
+    if not raw or raw == "n/a":
+        return "n/a"
+    first_word = raw.strip().lower().split()[0]
+    return first_word if first_word in VALID_SEVERITIES else "n/a"
+
+
+def analyse_frame(img, processor, model, device, is_anomaly: bool):
+    """
+    Full VQA + captioning pipeline for one frame.
+    Returns (caption, alert_label, severity, vqa_dict)
+    """
+    vqa = {}
+
+    # Step 1: core yes/no questions
+    vqa["accident"] = blip_vqa(img, processor, model, device, VQA_ACCIDENT)
+    vqa["fire"]     = blip_vqa(img, processor, model, device, VQA_FIRE)
+
+    accident_confirmed = vqa["accident"] in ("yes", "yeah", "true")
+    fire_confirmed     = vqa["fire"]     in ("yes", "yeah", "true")
+
+    # Step 2: choose caption prompt based on anomaly signal
+    if is_anomaly or accident_confirmed or fire_confirmed:
+        caption = blip_caption(img, processor, model, device,
+                               prompt=ANOMALY_CAPTION_PROMPT)
+        vqa["fall"]      = blip_vqa(img, processor, model, device, VQA_FALL)
+        vqa["wrong_way"] = blip_vqa(img, processor, model, device, VQA_WRONG_SIDE)
+        vqa["severity"]  = blip_vqa(img, processor, model, device, VQA_SEVERITY)
+    else:
+        caption = blip_caption(img, processor, model, device,
+                               prompt=CAPTION_PROMPT)
+        vqa["fall"]      = "n/a"
+        vqa["wrong_way"] = "n/a"
+        vqa["severity"]  = "n/a"
+
+    # Step 3: keyword mapping
+    alert_label, severity = map_caption_to_alert(caption)
+
+    # Step 4: VQA overrides
+    if accident_confirmed and severity != "CRITICAL":
+        alert_label, severity = "COLLISION / CRASH", "CRITICAL"
+    if fire_confirmed and severity != "CRITICAL":
+        alert_label, severity = "FIRE / SMOKE", "CRITICAL"
+    if vqa.get("fall", "") in ("yes", "yeah") and severity not in ("CRITICAL", "HIGH"):
+        alert_label, severity = "PERSON DOWN / FALL", "HIGH"
+    if vqa.get("wrong_way", "") in ("yes", "yeah") and severity != "CRITICAL":
+        alert_label, severity = "WRONG-WAY VEHICLE", "CRITICAL"
+
+    # Step 5: append severity tag — apenas se a resposta for válida
+    if is_anomaly or severity in ("CRITICAL", "HIGH"):
+        sev_str = parse_severity(vqa.get("severity", "n/a"))
+        if sev_str != "n/a":
+            caption = f"{caption}  [severity: {sev_str}]"
+
+    return caption, alert_label, severity, vqa
+
+
+# ── Directory helpers ─────────────────────────────────────────────────────────────
+def clean_dirs():
+    print(f"{YELLOW}[SETUP] Clearing output directories...{RESET}")
     for d in (FRAMES_DIR, ANOMALY_DIR):
         shutil.rmtree(d, ignore_errors=True)
         os.makedirs(d, exist_ok=True)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    print(f"  frames/     -> {os.path.abspath(FRAMES_DIR)}")
+    print(f"  collisions/ -> {os.path.abspath(ANOMALY_DIR)}\n")
 
-def get_video_path():
 
-    return VIDEO_PATH
-
-def extract_frames(video_path):
-
+def extract_frames(video_path: str) -> list:
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        print(f"ERROR: Could not open video: {video_path}")
+        print(f"{RED}ERROR: Cannot open video: {video_path}{RESET}")
         return []
-    frames, frame_idx, sec = [], 0, 0.0
-    while True:
+    frames, idx, sec = [], 0, 0.0
+    while len(frames) < MAX_FRAMES:
         cap.set(cv2.CAP_PROP_POS_MSEC, sec * 1000)
         ret, frame = cap.read()
-        if not ret or len(frames) >= MAX_FRAMES:
+        if not ret:
             break
-        img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        frames.append({
-            "frame_idx": frame_idx,
-            "time_sec": sec,
-            "image": Image.fromarray(img),
-        })
-        frame_idx += 1
+        img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        frames.append({"frame_idx": idx, "time_sec": sec, "image": img})
+        idx += 1
         sec += 1.0 / EXTRACT_FPS
     cap.release()
     return frames
- # Main pipeline
-def run():
 
-    print("=" * 60)
-    print("VIDEO ANOMALY DETECTION & CAPTIONING")
-    print("=" * 60)
-    print(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Output directory: {os.path.abspath(OUTPUT_DIR)}")
-    print("-" * 60)
 
-    print("[SETUP]")
-    clean_output_dirs()
-    print("Output folders cleaned.")
-    print("-" * 60)
-
-    print("[VIDEO FRAME EXTRACTION]")
-    video_path = get_video_path()
-    frames = extract_frames(video_path)
-    if not frames:
-        print("ERROR: No frames extracted.")
-        sys.exit(1)
-    print(f"Total frames extracted: {len(frames)}")
-    print("-" * 60)
-
-    print("[ANOMALY DETECTION]")
-    DIFF_SIZE = (96, 96)
+def compute_anomaly_scores(frames):
     diffs, ssims = [0.0], [1.0]
-    prev = np.array(frames[0]["image"].resize(DIFF_SIZE)).astype(np.float32)
-    prev_gray = cv2.cvtColor(np.uint8(prev), cv2.COLOR_RGB2GRAY)
+    prev   = np.array(frames[0]["image"].resize(DIFF_SIZE)).astype(np.float32)
+    prev_g = cv2.cvtColor(np.uint8(prev), cv2.COLOR_RGB2GRAY)
     for i in range(1, len(frames)):
-        curr = np.array(frames[i]["image"].resize(DIFF_SIZE)).astype(np.float32)
-        curr_gray = cv2.cvtColor(np.uint8(curr), cv2.COLOR_RGB2GRAY)
-        diffs.append(np.mean(np.abs(curr - prev)))
-        ssims.append(ssim(curr_gray, prev_gray, data_range=255))
-        prev, prev_gray = curr, curr_gray
-    mean_diff, std_diff = np.mean(diffs), np.std(diffs)
-    mean_ssim, std_ssim = np.mean(ssims), np.std(ssims)
-    threshold_diff = mean_diff + 2 * std_diff
-    threshold_ssim = mean_ssim - 2 * std_ssim
+        curr   = np.array(frames[i]["image"].resize(DIFF_SIZE)).astype(np.float32)
+        curr_g = cv2.cvtColor(np.uint8(curr), cv2.COLOR_RGB2GRAY)
+        diffs.append(float(np.mean(np.abs(curr - prev))))
+        ssims.append(float(ssim(curr_g, prev_g, data_range=255)))
+        prev, prev_g = curr, curr_g
+    arr_d, arr_s = np.array(diffs), np.array(ssims)
+    return (diffs, ssims,
+            float(arr_d.mean() + 2 * arr_d.std()),
+            float(arr_s.mean() - 2 * arr_s.std()))
+
+
+def label_frames(frames, diffs, ssims, thr_d, thr_s):
+    low_d, high_s = thr_d * 0.50, thr_s * 1.50
     anom_active = False
-    low_diff = threshold_diff * 0.5
-    high_ssim = threshold_ssim * 1.5
-    frame_results = []
+    results = []
     for i, fr in enumerate(frames):
-        diff, ssim_val = diffs[i], ssims[i]
-        is_anom_now = (diff > threshold_diff) or (ssim_val < threshold_ssim)
-        if is_anom_now:
+        d, s = diffs[i], ssims[i]
+        if (d > thr_d) or (s < thr_s):
             anom_active = True
-        elif diff < low_diff and ssim_val > high_ssim:
+        elif d < low_d and s > high_s:
             anom_active = False
-        is_anom = anom_active
-        status = "ANOMALY" if is_anom else "Normal"
-        print(f"Frame {fr['frame_idx']:>3}: Time={fr['time_sec']:>5.1f}s | Diff={diff:>7.3f} | SSIM={ssim_val:>6.3f} | Status: {status}")
-        fname = f"frame_{fr['frame_idx']:05d}_t{fr['time_sec']:.2f}s.jpg"
-        fr["image"].save(os.path.join(FRAMES_DIR, fname), quality=90)
-        if is_anom:
-            fr["image"].save(os.path.join(ANOMALY_DIR, fname), quality=90)
-        frame_results.append({
-            "frame_idx": int(fr["frame_idx"]),
-            "time_sec": float(fr["time_sec"]),
-            "difference": float(diff),
-            "ssim": float(ssim_val),
-            "is_anomaly": bool(is_anom),
+        results.append({
+            "frame_idx":  int(fr["frame_idx"]),
+            "time_sec":   float(fr["time_sec"]),
+            "difference": float(d),
+            "ssim":       float(s),
+            "is_anomaly": bool(anom_active),
         })
-    print(f"Diff threshold: {threshold_diff:.3f} | SSIM threshold: {threshold_ssim:.3f}")
-    print("-" * 60)
-
-    processor, model, device = load_blip()
-    chunk_descriptions, chunk_violations = [], []
-    if processor:
-        print("[BLIP CAPTIONING & QA]")
-        chunk_size = 10
-        chunks = [frames[i:i+chunk_size] for i in range(0, len(frames), chunk_size)]
-        vqa_question = "Is there any traffic violation, accident, or collision in this scene? Answer yes or no."
-        for idx, chunk in enumerate(chunks):
-            print(f"Chunk {idx+1}/{len(chunks)}:")
-            mid_frame = chunk[len(chunk)//2]["image"]
-            desc = describe_frame(mid_frame, processor, model, device)
-            chunk_descriptions.append(desc)
-            vqa_answer = vqa_frame(mid_frame, processor, model, device, vqa_question)
-            if vqa_answer is not None and vqa_answer.strip().lower() in ["yes", "no"]:
-                found = (vqa_answer.strip().lower() == "yes")
-                vqa_used = True
-            else:
-                found = any(word in desc.lower() for word in ["crash", "collision", "accident", "violation", "damage", "break", "hit"])
-                vqa_used = False
-            chunk_violations.append(found)
-            status = "VIOLATION" if found else "Normal"
-            vqa_note = f" [VQA: {vqa_answer}]" if vqa_used else " [KW]"
-            print(f"Status: {status} | Description: {desc}{vqa_note}")
-    else:
-        print("[BLIP CAPTIONING & QA] BLIP not available. Only anomaly detection will run.")
-    print("-" * 60)
-
-    print("[CHUNK QA SUMMARY]")
-    any_violation = any(chunk_violations)
-    print(f"Any violation detected? {'Yes' if any_violation else 'No'}")
-    violation_chunks = [i+1 for i, v in enumerate(chunk_violations) if v]
-    if violation_chunks:
-        print(f"Chunks with violation: {', '.join(map(str, violation_chunks))}")
-    else:
-        print("No violations detected in any chunk.")
-    n_viol = sum(1 for v in chunk_violations if v)
-    n_norm = sum(1 for v in chunk_violations if not v)
-    print(f"Total chunks — Violation: {n_viol} | Normal: {n_norm}")
-    print("-" * 60)
-
-    print("[OUTPUT SAVING]")
-    # Save grid, timeline, JSON, summary
-
-    # Step 0: Clean previous output
-    print("[Step 0] Cleaning previous output...")
-    clean_output_dirs()
-
-    # Step 1: Get video
-    print("[Step 1] Obtaining video...")
-    video_path = get_video_path()
-    print()
-
-    # Step 2: Extract frames from video
-    print("[Step 2] Extracting frames...")
-    frames = extract_frames(video_path)
-    if not frames:
-        print("ERROR: No frames were extracted.")
-        sys.exit(1)
-    print()
-
-    # Step 2.5: Chunking and description (after anomaly detection)
-    chunk_descriptions = []
-    chunk_violations = []
-
-    # Step 0: Clean previous output
-    print("[Step 0] Cleaning previous output...")
-    clean_output_dirs()
-
-    # Step 1: Get video
-    print("[Step 1] Obtaining video...")
-    video_path = get_video_path()
-    print()
-
-    # Step 2: Extract frames from video
-    print("[Step 2] Extracting frames...")
-    frames = extract_frames(video_path)
-    if not frames:
-        print("ERROR: No frames were extracted.")
-        sys.exit(1)
-    print()
-
-    # Step 3: Anomaly detection (frame difference)
-    print("\n=====================[ STEP 3: ANOMALY DETECTION ]=====================")
-    print("Detecting anomalies by frame difference\n")
-    header = f"{'#':<3} | {'Frame':<7} | {'Time (s)':>8} | {'Diff':>8} | {'Status':^9} | Description"
-    print(header)
-    print("-" * len(header))
-
-    # Use smaller resize for more sensitivity
-    DIFF_SIZE = (96, 96)
-    diffs = [0.0]  # First frame has no previous
-    ssims = [1.0]  # First frame is identical to itself
-    prev = np.array(frames[0]["image"].resize(DIFF_SIZE)).astype(np.float32)
-    prev_gray = cv2.cvtColor(np.uint8(prev), cv2.COLOR_RGB2GRAY)
-    for i in range(1, len(frames)):
-        curr = np.array(frames[i]["image"].resize(DIFF_SIZE)).astype(np.float32)
-        curr_gray = cv2.cvtColor(np.uint8(curr), cv2.COLOR_RGB2GRAY)
-        diff = np.mean(np.abs(curr - prev))
-        diffs.append(diff)
-        ssim_val = ssim(curr_gray, prev_gray, data_range=255)
-        ssims.append(ssim_val)
-        prev = curr
-        prev_gray = curr_gray
-
-    # Thresholds: mean + 2*std for diff, mean - 2*std for SSIM
-    mean_diff = np.mean(diffs)
-    std_diff = np.std(diffs)
-    threshold_diff = mean_diff + 2 * std_diff
-    mean_ssim = np.mean(ssims)
-    std_ssim = np.std(ssims)
-    threshold_ssim = mean_ssim - 2 * std_ssim
-    print(f"\n[DEBUG] All frame differences: {diffs}")
-    print(f"[DEBUG] All SSIM values: {ssims}")
-    print(f"[DEBUG] Diff threshold: {threshold_diff:.4f} (mean={mean_diff:.4f}, std={std_diff:.4f})")
-    print(f"[DEBUG] SSIM threshold: {threshold_ssim:.4f} (mean={mean_ssim:.4f}, std={std_ssim:.4f})\n")
+    return results
 
 
-    # Hysteresis: keep anomaly status until diff drops well below threshold
-    anom_active = False
-    low_threshold_diff = threshold_diff * 0.5
-    high_threshold_ssim = threshold_ssim * 1.5
+def save_frame_image(frame_data, res, is_anomaly, caption="", alert=""):
+    fname = f"frame_{res['frame_idx']:05d}_t{res['time_sec']:.2f}s.jpg"
+    frame_data["image"].save(os.path.join(FRAMES_DIR, fname), quality=92)
+    if is_anomaly:
+        img_copy = frame_data["image"].copy()
+        draw = ImageDraw.Draw(img_copy)
+        w, h = img_copy.size
+        draw.rectangle([(0, h - 52), (w, h)], fill=(160, 10, 10))
+        draw.text((6, h - 50), f"ANOMALY: {alert}", fill=(255, 220, 50))
+        draw.text((6, h - 30), caption[:90],        fill=(255, 255, 255))
+        img_copy.save(os.path.join(ANOMALY_DIR, fname), quality=92)
+    return fname
 
-    frame_results = []
-    for i, fr in enumerate(frames):
-        diff = diffs[i]
-        ssim_val = ssims[i]
-        # Anomaly if diff is high OR ssim is low
-        is_anom_now = (diff > threshold_diff) or (ssim_val < threshold_ssim)
-        # Hysteresis: keep anomaly status until both metrics are back to normal
-        if is_anom_now:
-            anom_active = True
-        elif diff < low_threshold_diff and ssim_val > high_threshold_ssim:
-            anom_active = False
-        is_anom = anom_active
 
-        if is_anom:
-            status_colored = "\033[91mANOMALY\033[0m"
-        else:
-            status_colored = "\033[92mNormal\033[0m"
-        print(f"{i+1:<3} | {fr['frame_idx']:<7} | {fr['time_sec']:>8.2f} | {diff:>8.4f} | {ssim_val:>6.3f} | {status_colored:^9}")
-
-        # Save frame images
-        fname = f"frame_{fr['frame_idx']:05d}_t{fr['time_sec']:.2f}s.jpg"
-        out_path = os.path.join(FRAMES_DIR, fname)
-        fr["image"].save(out_path, quality=90)
-        if is_anom:
-            anom_path = os.path.join(ANOMALY_DIR, fname)
-            fr["image"].save(anom_path, quality=90)
-
-        frame_results.append({
-            "frame_idx": int(fr["frame_idx"]),
-            "time_sec": float(fr["time_sec"]),
-            "difference": float(diff),
-            "ssim": float(ssim_val),
-            "is_anomaly": bool(is_anom),
-        })
-
-    print("\n" + "="*68)
-    print(f"Diff threshold: {threshold_diff:.4f} (mean + 2*std)")
-    print(f"SSIM threshold: {threshold_ssim:.4f} (mean - 2*std)")
-    print(f"All frames saved in: {FRAMES_DIR}")
-    print(f"Anomalous frames also saved in: {ANOMALY_DIR}")
-    print("="*68 + "\n")
-
-    # ... code...
-    # Step 3.5: BLIP chunking and VQA/question answering (after anomaly detection)
-    if processor:
-        print("\n[Step 3.5] Generating descriptions and VQA for video chunks...\n")
-        chunk_size = 10
-        chunks = [frames[i:i+chunk_size] for i in range(0, len(frames), chunk_size)]
-        keywords = ["crash", "collision", "accident", "violation", "damage", "break", "hit"]
-        vqa_question = "Is there any traffic violation, accident, or collision in this scene? Answer yes or no."
-        for idx, chunk in enumerate(chunks):
-            print(f"\n[BLIP] Processing chunk {idx+1}/{len(chunks)}...")
-            mid_frame = chunk[len(chunk)//2]["image"]
-            desc = describe_frame(mid_frame, processor, model, device)
-            chunk_descriptions.append(desc)
-            # Try VQA first
-            vqa_answer = vqa_frame(mid_frame, processor, model, device, vqa_question)
-            if vqa_answer is not None and vqa_answer.strip().lower() in ["yes", "no"]:
-                found = (vqa_answer.strip().lower() == "yes")
-                vqa_used = True
-            else:
-                # Fallback to keyword search
-                found = any(word in desc.lower() for word in keywords)
-                vqa_used = False
-            chunk_violations.append(found)
-            color = "\033[91m" if found else "\033[92m"
-            status = "VIOLATION" if found else "Normal"
-            vqa_note = f" [VQA: {vqa_answer}]" if vqa_used else " [KW]"
-            print(f"Chunk {idx+1}: {color}{status}\033[0m — {desc}{vqa_note}\n")
-    else:
-        print("BLIP not available. Only classic anomaly detection will run.")
-        chunk_violations = []
-        chunk_descriptions = []
-
-    # Chunk QA logic (after anomaly detection)
-    print("\n[Step 6.5] Question Answering on Chunks and Anomalies:\n")
-    # Print chunk violations and descriptions
-    print("[INFO] BLIP Chunk Analysis Summary (only frames analyzed by BLIP):")
-    print("-" * 60)
-    if chunk_violations and len(chunk_violations) == len(chunk_descriptions):
-        any_violation = any(chunk_violations)
-        print(f"1. Violation detected? {'Yes' if any_violation else 'No'}")
-        violation_chunks = [i+1 for i, v in enumerate(chunk_violations) if v]
-        if violation_chunks:
-            print(f"2. Chunks with violation: {', '.join(map(str, violation_chunks))}")
-        else:
-            print("2. No violations detected in any chunk.")
-        n_viol = sum(1 for v in chunk_violations if v)
-        n_norm = sum(1 for v in chunk_violations if not v)
-        print(f"3. Chunks — Violation: {n_viol} | Normal: {n_norm}")
-        chunk_size = 10
-        chunk_anomaly_overlap = []
-        for idx, is_viol in enumerate(chunk_violations):
-            if is_viol:
-                start = idx * chunk_size
-                end = min(start + chunk_size, len(frame_results))
-                if any(fr['is_anomaly'] for fr in frame_results[start:end]):
-                    chunk_anomaly_overlap.append(idx+1)
-        if chunk_anomaly_overlap:
-            print(f"4. Chunks with both violation and anomaly: {', '.join(map(str, chunk_anomaly_overlap))}")
-        else:
-            print("4. No chunk had both a violation and an anomaly.")
-        print("-" * 60)
-        print("\nDetailed BLIP Chunk Results:")
-        print(f"{'Chunk':<6} | {'Status':<10} | {'Description'}")
-        print("-" * 60)
-        for idx, (desc, viol) in enumerate(zip(chunk_descriptions, chunk_violations)):
-            status = "VIOLATION" if viol else "Normal"
-            print(f"{idx+1:<6} | {status:<10} | {desc}")
-        print("-" * 60)
-    else:
-        print("No chunk-based QA available (BLIP not run or no chunks).")
-
-    # Save all frames grid
-    print("[Step 4] Saving all frames grid...")
-    N_COLS = 6
-    THUMB_W = 210
-    THUMB_H = 130
-    LABEL_H = 52
-    CELL_H = THUMB_H + LABEL_H
-    n_rows = math.ceil(len(frame_results) / N_COLS)
-    grid = Image.new("RGB", (N_COLS * THUMB_W, n_rows * CELL_H), (14, 14, 26))
+def save_grid(frames, frame_results, captions):
+    N_COLS, TW, TH, LH = 5, 220, 135, 85
+    n_rows = math.ceil(len(frames) / N_COLS)
+    grid = Image.new("RGB", (N_COLS * TW, n_rows * (TH + LH)), (14, 14, 26))
     draw = ImageDraw.Draw(grid)
-    for pos, fr in enumerate(frame_results):
+    for pos, fr in enumerate(frames):
+        res = frame_results[pos]
+        cap = captions[pos] if pos < len(captions) else ""
         col, row = pos % N_COLS, pos // N_COLS
-        x, y = col * THUMB_W, row * CELL_H
-        is_an = fr["is_anomaly"]
-        # Use the original frames list to get the image
-        thumb = frames[pos]["image"].resize((THUMB_W, THUMB_H), Image.LANCZOS)
+        x, y = col * TW, row * (TH + LH)
+        thumb = fr["image"].resize((TW, TH), Image.LANCZOS)
         grid.paste(thumb, (x, y))
-        bg = (145, 15, 15) if is_an else (15, 95, 25)
-        draw.rectangle([(x, y + THUMB_H), (x + THUMB_W - 1, y + CELL_H - 1)], fill=bg)
-        status = "ANOMALY" if is_an else "Normal"
-        draw.text((x + 4, y + THUMB_H + 3), status, fill=(255, 80, 80) if is_an else (80, 255, 100))
-        draw.text((x + 4, y + THUMB_H + 18), f"t={fr['time_sec']:.1f}s  frm={fr['frame_idx']}", fill=(200, 200, 200))
-        border_col = (210, 25, 25) if is_an else (25, 155, 55)
-        draw.rectangle([(x, y), (x + THUMB_W - 1, y + CELL_H - 1)], outline=border_col, width=3)
+        anom = res["is_anomaly"]
+        draw.rectangle([(x, y + TH), (x + TW - 1, y + TH + LH - 1)],
+                       fill=(120, 10, 10) if anom else (10, 60, 20))
+        draw.text((x + 4, y + TH + 3),
+                  "ANOMALY" if anom else "Normal",
+                  fill=(255, 80, 80) if anom else (80, 255, 100))
+        draw.text((x + 4, y + TH + 18),
+                  f"t={res['time_sec']:.1f}s  D={res['difference']:.2f}",
+                  fill=(200, 200, 200))
+        alert_str = res.get("alert", "")[:32]
+        draw.text((x + 4, y + TH + 34), alert_str,
+                  fill=(255, 200, 50) if anom else (150, 150, 200))
+        cap_short = (cap[:52] + "...") if len(cap) > 52 else cap
+        draw.text((x + 4, y + TH + 52), cap_short, fill=(180, 180, 255))
+        draw.rectangle([(x, y), (x + TW - 1, y + TH + LH - 1)],
+                       outline=(210, 25, 25) if anom else (25, 155, 55), width=3)
     grid.save(GRID_PATH, quality=90)
-    print(f"All frames grid saved: {GRID_PATH}")
+    print(f"  Grid saved       -> {GRID_PATH}")
 
 
-    # Save anomaly timeline chart
-    print("[Step 5] Saving anomaly timeline chart...")
-    import matplotlib.pyplot as plt
-    import matplotlib.patches as mpatches
+def save_timeline(frame_results, thr_d):
+    times = [r["time_sec"]   for r in frame_results]
+    diffs = [r["difference"] for r in frame_results]
     fig, ax = plt.subplots(figsize=(14, 5))
     fig.patch.set_facecolor("#0f0f1a")
     ax.set_facecolor("#1a1a2e")
-    times = [fr["time_sec"] for fr in frame_results]
-    diffs_plot = [fr["difference"] for fr in frame_results]
-    ax.plot(times, diffs_plot, color="#4fc3f7", label="Frame difference", zorder=2)
-    ax.axhline(threshold_diff, color="#ffd700", linestyle="--", linewidth=2, zorder=4, label="Anomaly threshold")
-    for i, fr in enumerate(frame_results):
-        if fr["is_anomaly"]:
-            ax.scatter(fr["time_sec"], fr["difference"], color="#e72f2f", s=60, zorder=5)
-    ax.set_title("Anomaly Detection — Frame Difference Over Time", color="white", fontsize=13, pad=12)
-    ax.set_xlabel("Time (seconds)", color="white", fontsize=11)
-    ax.set_ylabel("Frame difference", color="white", fontsize=11)
+    ax.plot(times, diffs, color="#4fc3f7", lw=1.8, zorder=2)
+    ax.fill_between(times, diffs, alpha=0.15, color="#4fc3f7")
+    ax.axhline(thr_d, color="#ffd700", linestyle="--", lw=2, zorder=4)
+    for r in frame_results:
+        if r["is_anomaly"]:
+            ax.scatter(r["time_sec"], r["difference"],
+                       color="#e72f2f", s=70, zorder=5)
+            ax.annotate(r.get("alert", "")[:20],
+                        (r["time_sec"], r["difference"]),
+                        textcoords="offset points", xytext=(4, 6),
+                        fontsize=6, color="#ff8888")
+    ax.set_title("Anomaly Detection - Frame Difference Over Time",
+                 color="white", fontsize=13, pad=12)
+    ax.set_xlabel("Time (s)", color="white")
+    ax.set_ylabel("Frame Delta", color="white")
     ax.tick_params(colors="white")
     for sp in ax.spines.values():
         sp.set_edgecolor("#ffffff22")
-    ax.grid(axis="y", color="#ffffff1a", linestyle="--", lw=0.8, zorder=0)
+    ax.grid(axis="y", color="#ffffff1a", linestyle="--", lw=0.8)
     handles = [
-        mpatches.Patch(color="#4fc3f7", label="Normal frame"),
-        mpatches.Patch(color="#e84545", label="Anomalous frame"),
+        mpatches.Patch(color="#4fc3f7", label="Normal"),
+        mpatches.Patch(color="#e84545", label="Anomalous"),
         plt.Line2D([0], [0], color="#ffd700", linestyle="--", label="Threshold"),
     ]
-    ax.legend(handles=handles, facecolor="#0f0f1a", labelcolor="white", edgecolor="#ffffff33", fontsize=9)
+    ax.legend(handles=handles, facecolor="#0f0f1a", labelcolor="white",
+              edgecolor="#ffffff33", fontsize=9)
     plt.tight_layout()
-    plt.savefig(CHART_PATH, dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
+    plt.savefig(CHART_PATH, dpi=150, bbox_inches="tight",
+                facecolor=fig.get_facecolor())
     plt.close()
-    print(f"Anomaly timeline chart saved: {CHART_PATH}")
+    print(f"  Timeline saved   -> {CHART_PATH}")
 
-    # Save the final report as JSON
-    print("[Step 6] Saving final report as JSON...")
-    def to_float(val):
-        # Convert numpy float32/float64 to Python float
-        if isinstance(val, (np.floating,)):
-            return float(val)
-        return val
+
+# ── Main ──────────────────────────────────────────────────────────────────────────
+def run():
+    print(BOLD + "=" * 72 + RESET)
+    print(BOLD + "  VIDEO ANOMALY DETECTION & CAPTIONING  (BLIP-large + VQA chain)" + RESET)
+    print(BOLD + "=" * 72 + RESET)
+    print(f"  Started : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"  Video   : {VIDEO_PATH}")
+    print(f"  Output  : {os.path.abspath(OUTPUT_DIR)}")
+    print("=" * 72 + "\n")
+
+    clean_dirs()
+
+    # 1. Extract frames
+    print(BOLD + "[1/5] FRAME EXTRACTION" + RESET)
+    frames = extract_frames(VIDEO_PATH)
+    if not frames:
+        sys.exit(1)
+    print(f"  Extracted {len(frames)} frames at {EXTRACT_FPS} FPS\n")
+
+    # 2. Load BLIP
+    print(BOLD + "[2/5] LOADING BLIP MODEL" + RESET)
+    processor, model, device = load_blip()
+    if not processor:
+        print(f"  {YELLOW}BLIP unavailable - captions will be empty.{RESET}\n")
+
+    # 3. Anomaly detection + per-frame captioning
+    print(BOLD + "[3/5] ANOMALY DETECTION + PER-FRAME VQA & CAPTIONING" + RESET)
+    diffs, ssims, thr_d, thr_s = compute_anomaly_scores(frames)
+    frame_results = label_frames(frames, diffs, ssims, thr_d, thr_s)
+
+    hdr = (f"  {'#':<4} {'Time':>6}  {'Status':<9}  {'Alert':<26}  Description")
+    print(hdr)
+    print("  " + "-" * 85)
+
+    per_frame_captions = []
+
+    for i, res in enumerate(frame_results):
+        img     = frames[i]["image"]
+        is_anom = res["is_anomaly"]
+
+        if processor:
+            caption, alert_label, severity, vqa = analyse_frame(
+                img, processor, model, device, is_anom)
+        else:
+            caption, alert_label, severity, vqa = "(no model)", "NO ALERT", "NORMAL", {}
+
+        per_frame_captions.append(caption)
+        save_frame_image(frames[i], res, is_anom, caption, alert_label)
+
+        res["caption"]  = caption
+        res["alert"]    = alert_label
+        res["severity"] = severity
+        res["vqa"]      = vqa
+
+        sc = RED   if is_anom else GREEN
+        st = "ANOMALY" if is_anom else "Normal "
+        ac = RED    if severity in ("CRITICAL", "HIGH") else \
+             YELLOW if severity == "MEDIUM"             else DIM
+
+        print(f"  {i + 1:<4} {res['time_sec']:>5.1f}s  "
+              f"{sc}{BOLD}{st}{RESET}   "
+              f"{ac}{alert_label:<26}{RESET}  "
+              f"{DIM}{caption}{RESET}")
+
+    n_anom = sum(1 for r in frame_results if r["is_anomaly"])
+    print("  " + "-" * 85)
+    print(f"\n  Anomalous frames : {RED}{n_anom}{RESET} / {len(frame_results)}")
+    print(f"  Frames saved     -> {FRAMES_DIR}")
+    print(f"  Anomalies saved  -> {ANOMALY_DIR}\n")
+
+    # 4. Chunk-level summary
+    print(BOLD + "[4/5] CHUNK-LEVEL ALERT SUMMARY" + RESET)
+    chunks = [frame_results[i:i + CHUNK_SIZE]
+              for i in range(0, len(frame_results), CHUNK_SIZE)]
+    chunk_results_data = []
+    severity_order = {"CRITICAL": 5, "HIGH": 4, "MEDIUM": 3, "LOW": 2, "INFO": 1, "NORMAL": 0}
+
+    print(f"\n  {'Chunk':<6}  {'Time Range':<14}  {'Anomaly Frames':>14}  "
+          f"{'Top Alert':<28}  What Happened")
+    print("  " + "-" * 100)
+
+    for ci, chunk in enumerate(chunks):
+        t_start  = chunk[0]["time_sec"]
+        t_end    = chunk[-1]["time_sec"]
+        n_anom_c = sum(1 for r in chunk if r["is_anomaly"])
+        best     = max(chunk,
+                       key=lambda r: severity_order.get(r.get("severity", "NORMAL"), 0))
+        top_alert   = best.get("alert",   "NO ALERT")
+        top_caption = best.get("caption", "")
+        top_sev     = best.get("severity", "NORMAL")
+
+        color = RED    if top_sev in ("CRITICAL", "HIGH") else \
+                YELLOW if top_sev == "MEDIUM"             else GREEN
+
+        print(f"  {ci + 1:<6}  {t_start:.1f}s-{t_end:.1f}s{'':<5}  "
+              f"{n_anom_c:>14}  "
+              f"{color}{top_alert:<28}{RESET}  "
+              f"{DIM}{top_caption[:65]}{RESET}")
+
+        chunk_results_data.append({
+            "chunk":          ci + 1,
+            "time_range":     f"{t_start:.1f}s-{t_end:.1f}s",
+            "anomaly_frames": n_anom_c,
+            "top_alert":      top_alert,
+            "top_severity":   top_sev,
+            "what_happened":  top_caption,
+        })
+
+    print("  " + "-" * 100 + "\n")
+
+    # 5. Save outputs
+    print(BOLD + "[5/5] SAVING OUTPUTS" + RESET)
+    save_grid(frames, frame_results, per_frame_captions)
+    save_timeline(frame_results, thr_d)
 
     report = {
-        "created_at": datetime.now().isoformat(),
-        "video_path": video_path,
-        "extract_fps": float(EXTRACT_FPS),
-        "max_frames": int(MAX_FRAMES),
-        "threshold_diff": to_float(threshold_diff),
-        "threshold_ssim": to_float(threshold_ssim),
-        "frames": [
-            {
-                "frame_idx": int(fr["frame_idx"]),
-                "time_sec": to_float(fr["time_sec"]),
-                "difference": to_float(fr["difference"]),
-                "ssim": to_float(fr["ssim"]),
-                "is_anomaly": bool(fr["is_anomaly"]),
-            }
-            for fr in frame_results
-        ],
+        "created_at":  datetime.now().isoformat(),
+        "video_path":  VIDEO_PATH,
+        "extract_fps": EXTRACT_FPS,
+        "max_frames":  MAX_FRAMES,
+        "frames":      frame_results,
+        "chunks":      chunk_results_data,
         "summary": {
-            "total_frames": int(len(frame_results)),
-            "anomalous_frames": int(sum(1 for fr in frame_results if fr["is_anomaly"])),
-            "first_anomaly_time": to_float(next((fr["time_sec"] for fr in frame_results if fr["is_anomaly"]), None)),
-            "last_anomaly_time": to_float(next((fr["time_sec"] for fr in reversed(frame_results) if fr["is_anomaly"]), None)),
-        }
+            "total_frames":       len(frame_results),
+            "anomalous_frames":   n_anom,
+            "first_anomaly_time": next(
+                (r["time_sec"] for r in frame_results if r["is_anomaly"]), None),
+            "last_anomaly_time":  next(
+                (r["time_sec"] for r in reversed(frame_results) if r["is_anomaly"]), None),
+        },
     }
     with open(REPORT_PATH, "w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2)
+        json.dump(report, f, indent=2, ensure_ascii=False)
+    print(f"  Report saved     -> {REPORT_PATH}")
 
-    print(f"Final report saved: {REPORT_PATH}")
+    print(f"\n{BOLD}{'=' * 72}{RESET}")
+    print(f"  Total frames  : {BOLD}{len(frame_results)}{RESET}")
+    print(f"  Anomalous     : {RED}{BOLD}{n_anom}{RESET}")
+    print(f"  Normal        : {GREEN}{BOLD}{len(frame_results) - n_anom}{RESET}")
+    print(f"{BOLD}{'=' * 72}{RESET}")
+    print(f"\n  {GREEN}Done! Output -> {os.path.abspath(OUTPUT_DIR)}{RESET}\n")
 
-    # Step 7: Print summary of results
-    print("\n[Step 7] Summary of Results")
-    total_frames = len(frame_results)
-    anomaly_count = sum(1 for fr in frame_results if fr["is_anomaly"])
-    normal_count = total_frames - anomaly_count
-    print(f"Frames captured: \033[93m{total_frames}\033[0m")
-    print(f"Anomalous frames: \033[91m{anomaly_count}\033[0m")
-    print(f"Normal frames: \033[92m{normal_count}\033[0m")
-    print("==========================\n")
 
 if __name__ == "__main__":
     run()
