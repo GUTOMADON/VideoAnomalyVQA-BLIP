@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.swp
+.DS_Store
+.env
+.env.*
+output_video/*.jpg
+output_video/*.png
+output_video/frames/
+output_video/collisions/
