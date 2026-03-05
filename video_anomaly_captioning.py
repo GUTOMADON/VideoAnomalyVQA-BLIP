@@ -12,32 +12,8 @@ Video Anomaly Detection & Captioning
 """
 
 import subprocess, sys, os
-
-REQUIRED = [
-    "numpy", "opencv-python", "scikit-image", "matplotlib",
-    "Pillow", "transformers", "torch", "torchvision",
-]
-
-def _install(pkg):
-    try:
-        subprocess.check_call(["uv", "pip", "install", "--quiet", pkg],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "--quiet", pkg,
-             "--break-system-packages"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-for _pkg in REQUIRED:
-    try:
-        __import__(_pkg.split("[")[0].replace("-","_").replace("opencv_python","cv2"))
-    except ImportError:
-        print(f"[SETUP] Installing {_pkg}...")
-        _install(_pkg)
-
 import json, math, shutil, warnings
 from datetime import datetime
-
 import numpy as np
 import cv2
 import matplotlib
@@ -65,7 +41,7 @@ REPORT_PATH = os.path.join(OUTPUT_DIR, "report.json")
 CHART_PATH  = os.path.join(OUTPUT_DIR, "anomaly_timeline.png")
 GRID_PATH   = os.path.join(OUTPUT_DIR, "all_frames_grid.jpg")
 
-EXTRACT_FPS = 1.0
+EXTRACT_FPS = 1.0 #!!!!!!!!!!!!!!!!!!
 MAX_FRAMES  = 60
 CHUNK_SIZE  = 10
 DIFF_SIZE   = (96, 96)
@@ -191,8 +167,8 @@ def blip_vqa(img, processor, model, device, question: str) -> str:
 
 def parse_severity(raw: str) -> str:
     """
-    Extrai apenas 'minor', 'moderate' ou 'severe' da resposta do VQA.
-    Retorna 'n/a' se o modelo ecoou a pergunta ou respondeu algo inválido.
+        Extracts only 'minor', 'moderate', or 'severe' from the VQA response.
+        Returns 'n/a' if the model echoed the question or responded with something invalid.
     """
     if not raw or raw == "n/a":
         return "n/a"
