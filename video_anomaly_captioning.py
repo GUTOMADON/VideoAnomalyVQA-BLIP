@@ -1,15 +1,11 @@
 """
 Video Anomaly Detection & Captioning
--------------------------------------
-- Extracts frames at 1 FPS (configurable)
-- Detects anomalies via frame difference + SSIM
-- Captions EVERY frame with BLIP using anomaly-focused prompts
-- For anomaly frames: uses a dedicated "what happened?" prompt
-- Maps captions -> alerts via expanded prompt engineering
-- Colored terminal output: RED = ANOMALY, GREEN = Normal
-- Saves: frames/, collisions/, report.json, grid, timeline chart
-- Clears output folders on each run
 """
+# Extracts frames at 1 FPS (configurable), detects anomalies via frame diff + SSIM
+# Captions every frame with BLIP, using anomaly-focused prompts ("what happened?" for anomalies)
+# Maps captions to alerts via expanded prompt engineering
+# Terminal output: RED = ANOMALY, GREEN = Normal
+# Saves frames/, collisions/, report.json, grid, timeline chart; clears output folders on each run
 
 import subprocess, sys, os
 import json, math, shutil, warnings
@@ -32,7 +28,7 @@ try:
 except ImportError:
     BLIP_AVAILABLE = False
 
-# ── Configuration ────────────────────────────────────────────────────────────────
+# Configuration 
 VIDEO_PATH  = r"input_video.mp4"
 OUTPUT_DIR  = "output_video"
 FRAMES_DIR  = os.path.join(OUTPUT_DIR, "frames")
@@ -41,7 +37,7 @@ REPORT_PATH = os.path.join(OUTPUT_DIR, "report.json")
 CHART_PATH  = os.path.join(OUTPUT_DIR, "anomaly_timeline.png")
 GRID_PATH   = os.path.join(OUTPUT_DIR, "all_frames_grid.jpg")
 
-EXTRACT_FPS = 1.0 #!!!!!!!!!!!!!!!!!!
+EXTRACT_FPS = 0.5 #!!!!!!!!!!!!!!!!!!
 MAX_FRAMES  = 60
 CHUNK_SIZE  = 10
 DIFF_SIZE   = (96, 96)
@@ -54,7 +50,7 @@ RESET  = "\033[0m"
 BOLD   = "\033[1m"
 DIM    = "\033[2m"
 
-# ── Prompts ───────────────────────────────────────────────────────────────────────
+# Prompts 
 CAPTION_PROMPT         = "a traffic camera photo of"
 ANOMALY_CAPTION_PROMPT = "a traffic camera showing an accident where"
 
@@ -67,7 +63,7 @@ VQA_SEVERITY   = "how severe is the incident in this image? answer: minor, moder
 # Respostas válidas para severidade
 VALID_SEVERITIES = {"minor", "moderate", "severe"}
 
-# ── Alert rules (order = priority, first match wins) ─────────────────────────────
+#  Alert rules (order = priority, first match wins) 
 ALERT_RULES = [
     # CRITICAL
     (["crash", "collision", "collide", "accident", "wreck", "smash", "impact",
@@ -115,6 +111,8 @@ ALERT_RULES = [
      "TRAFFIC SCENE",         "INFO"),
 ]
 
+# Matches keywords in the caption to return an alert label and severity
+# or "NO ALERT" if none found
 def map_caption_to_alert(caption: str):
     cap = caption.lower()
     for keywords, label, severity in ALERT_RULES:
@@ -123,7 +121,9 @@ def map_caption_to_alert(caption: str):
     return "NO ALERT", "NORMAL"
 
 
-# ── BLIP helpers ──────────────────────────────────────────────────────────────────
+#BLIP helpers
+# Loads the BLIP model and processor, selects GPU/CPU
+# or returns None if BLIP is unavailable
 def load_blip():
     if not BLIP_AVAILABLE:
         return None, None, None
@@ -139,6 +139,8 @@ def load_blip():
     return processor, model, device
 
 
+# Generates a caption for an image using the BLIP model
+# optionally considering a prompt, and returns the caption text
 def blip_caption(img, processor, model, device, prompt=None) -> str:
     with torch.no_grad():
         if prompt:
@@ -153,7 +155,8 @@ def blip_caption(img, processor, model, device, prompt=None) -> str:
         text = text[len(prompt):].strip()
     return text
 
-
+# Uses the BLIP model to answer a question about an image and returns the response
+# or "n/a" if an error occurs
 def blip_vqa(img, processor, model, device, question: str) -> str:
     try:
         with torch.no_grad():
@@ -165,6 +168,8 @@ def blip_vqa(img, processor, model, device, question: str) -> str:
         return "n/a"
 
 
+# Extracts 'minor', 'moderate'
+# or 'severe' from a VQA response, returning 'n/a' if invalid or the question is echoed
 def parse_severity(raw: str) -> str:
     """
         Extracts only 'minor', 'moderate', or 'severe' from the VQA response.
@@ -176,6 +181,10 @@ def parse_severity(raw: str) -> str:
     return first_word if first_word in VALID_SEVERITIES else "n/a"
 
 
+# Analyzes a single video frame by answering core VQA questions, generating a caption,
+# and determining an alert label and severity
+# It adapts based on anomaly detection, accident/fire conditions, 
+# and overrides the results based on critical findings like "fall" or "wrong-way"
 def analyse_frame(img, processor, model, device, is_anomaly: bool):
     """
     Full VQA + captioning pipeline for one frame.
@@ -226,7 +235,7 @@ def analyse_frame(img, processor, model, device, is_anomaly: bool):
     return caption, alert_label, severity, vqa
 
 
-# ── Directory helpers ─────────────────────────────────────────────────────────────
+# Directory helpers 
 def clean_dirs():
     print(f"{YELLOW}[SETUP] Clearing output directories...{RESET}")
     for d in (FRAMES_DIR, ANOMALY_DIR):
@@ -237,6 +246,9 @@ def clean_dirs():
     print(f"  collisions/ -> {os.path.abspath(ANOMALY_DIR)}\n")
 
 
+# Extracts frames from a video at a specified frame rate (EXTRACT_FPS)
+# and returns them as a list of images with index and timestamp
+# Stops after reaching a maximum frame count (MAX_FRAMES) or the end of the video
 def extract_frames(video_path: str) -> list:
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -256,6 +268,10 @@ def extract_frames(video_path: str) -> list:
     return frames
 
 
+# Computes anomaly scores for frames
+# by calculating the difference and SSIM (Structural Similarity) between consecutive frames
+# Returns the differences, SSIM values, and thresholds based on the mean 
+# and standard deviation of these scores
 def compute_anomaly_scores(frames):
     diffs, ssims = [0.0], [1.0]
     prev   = np.array(frames[0]["image"].resize(DIFF_SIZE)).astype(np.float32)
@@ -271,7 +287,10 @@ def compute_anomaly_scores(frames):
             float(arr_d.mean() + 2 * arr_d.std()),
             float(arr_s.mean() - 2 * arr_s.std()))
 
-
+# Labels each frame as an anomaly or normal based on the difference
+# and SSIM scores compared to threshold values
+# Flags anomalies when the difference is high or SSIM is low, 
+# and resets if difference is low and SSIM is high
 def label_frames(frames, diffs, ssims, thr_d, thr_s):
     low_d, high_s = thr_d * 0.50, thr_s * 1.50
     anom_active = False
@@ -292,6 +311,8 @@ def label_frames(frames, diffs, ssims, thr_d, thr_s):
     return results
 
 
+# Saves a frame image with an "ANOMALY" label if flagged,
+# storing it in the appropriate directory
 def save_frame_image(frame_data, res, is_anomaly, caption="", alert=""):
     fname = f"frame_{res['frame_idx']:05d}_t{res['time_sec']:.2f}s.jpg"
     frame_data["image"].save(os.path.join(FRAMES_DIR, fname), quality=92)
@@ -306,6 +327,9 @@ def save_frame_image(frame_data, res, is_anomaly, caption="", alert=""):
     return fname
 
 
+# Creates and saves a grid of resized frame thumbnails with anomaly labels 
+# and additional information (time, difference, caption)
+# Each frame is displayed with a color-coded label indicating whether it's an anomaly or normal
 def save_grid(frames, frame_results, captions):
     N_COLS, TW, TH, LH = 5, 220, 135, 85
     n_rows = math.ceil(len(frames) / N_COLS)
@@ -338,6 +362,9 @@ def save_grid(frames, frame_results, captions):
     print(f"  Grid saved       -> {GRID_PATH}")
 
 
+# Plots and saves a timeline of frame differences over time,
+# marking anomalies with red dots and displaying the threshold line
+# Includes labels for normal and anomalous events, and saves the chart as an image
 def save_timeline(frame_results, thr_d):
     times = [r["time_sec"]   for r in frame_results]
     diffs = [r["difference"] for r in frame_results]
@@ -377,7 +404,7 @@ def save_timeline(frame_results, thr_d):
     print(f"  Timeline saved   -> {CHART_PATH}")
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────────
+# Main
 def run():
     print(BOLD + "=" * 72 + RESET)
     print(BOLD + "  VIDEO ANOMALY DETECTION & CAPTIONING  (BLIP-large + VQA chain)" + RESET)
